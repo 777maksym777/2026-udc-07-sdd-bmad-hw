@@ -174,7 +174,7 @@ Task B потребує SDD-інструмента. **Встановіть йо�
 - [x] **Task B:** артефакти SDD-інструмента + `docs/sdd-tool.md`
 - [x] **Task C:** реалізація + тести за ID критеріїв + `docs/traceability.md` зі зворотною перевіркою
 - [x] **Task D:** `docs/ab-validation.md` — обидва прогони, таблиця розвилок, висновок
-- [ ] **Task E (bonus):** `docs/task-e-bonus.md` (опціонально)
+- [x] **Task E (bonus):** `docs/task-e-bonus.md` (опціонально)
 - [x] `cd app && npm test` зелений
 - [x] Жодних секретів; `.env` не закомічено
 
