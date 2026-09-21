@@ -1,123 +1,106 @@
-// Discount engine. Implements docs/spec/pricing-discounts.md (decisions
-// D-1..D-14, criteria AC-1..AC-12). All amounts are whole kopecks; the only
-// fractional values are transient percentage results, each rounded exactly
-// once (half a kopeck rounds up, D-4).
+// Discount engine for the autumn campaign (materials/feature-request.md).
+// All amounts are whole kopecks. Discounts apply to the goods subtotal only;
+// shipping is added afterwards and is never discounted.
 
-import type { Order, LineItem, Coupon } from "./types.js";
-import { lineTotalKopecks, subtotalKopecks, shippingKopecks, tierPercent } from "./pricing.js";
+import type { Coupon, LineItem, Order } from "./types.js";
+import { lineTotalKopecks, shippingKopecks, subtotalKopecks, tierPercent } from "./pricing.js";
 
-export type CouponRejectionReason =
-  | "expired" // now ≥ expiresAt (D-8, D-11)
-  | "unknown" // code not in the catalog (D-9)
-  | "duplicate" // same code entered again (D-10)
-  | "min_subtotal_not_met" // pre-discount subtotal < minSubtotalKopecks (D-6)
-  | "not_applicable"; // the coupon's base (category/order) is empty (D-12, D-14)
+export type SkipReason =
+  | "unknown"
+  | "duplicate"
+  | "expired"
+  | "below_min_subtotal"
+  | "no_matching_items";
 
 export interface AppliedCoupon {
   code: string;
-  /** Actually granted amount — possibly truncated per D-7/D-13. */
   discountKopecks: number;
 }
 
-export interface RejectedCoupon {
+export interface SkippedCoupon {
   code: string;
-  reason: CouponRejectionReason;
+  reason: SkipReason;
 }
 
-export interface PriceBreakdown {
+export interface OrderPricing {
   subtotalKopecks: number;
   tierDiscountKopecks: number;
-  /** Sum over appliedCoupons. */
-  couponDiscountKopecks: number;
-  /** In the order the customer typed the codes. */
+  /** Valid coupons, in the order the customer typed them. */
   appliedCoupons: AppliedCoupon[];
-  /** In the order the customer typed the codes. */
-  rejectedCoupons: RejectedCoupon[];
+  /** Coupons that did not apply, each with the reason — never a thrown error. */
+  skippedCoupons: SkippedCoupon[];
+  /** tier + coupons, capped at the subtotal so the goods part never goes negative. */
+  discountKopecks: number;
   shippingKopecks: number;
-  /** subtotal − tier − coupons + shipping; never below shipping (D-2, D-7). */
   totalKopecks: number;
 }
 
-/** Half a kopeck rounds up; inputs are always non-negative here (D-4). */
-function roundHalfUp(x: number): number {
-  return Math.round(x);
-}
-
-function categorySumKopecks(order: Order, category: LineItem["category"]): number {
+function categoryTotalKopecks(order: Order, category: LineItem["category"]): number {
   return order.items
-    .filter((i) => i.category === category)
-    .reduce((sum, i) => sum + lineTotalKopecks(i), 0);
+    .filter((item) => item.category === category)
+    .reduce((sum, item) => sum + lineTotalKopecks(item), 0);
 }
 
 /**
- * First matching rejection reason, or null when the coupon is valid.
- * Normative order: unknown → duplicate → expired → min_subtotal_not_met →
- * not_applicable (D-6, D-8..D-12).
+ * Prices an order: tier discount plus every valid coupon, all computed from
+ * the pre-discount subtotal (or the coupon's category slice of it), summed,
+ * capped at the subtotal, shipping added on top. Each percentage is rounded
+ * once with Math.round (half a kopeck rounds up).
  */
-function rejectionReason(
-  coupon: Coupon | undefined,
-  alreadySeen: boolean,
-  subtotal: number,
-  baseKopecks: number,
-  now: Date,
-): CouponRejectionReason | null {
-  if (!coupon) return "unknown";
-  if (alreadySeen) return "duplicate";
-  if (now.getTime() >= new Date(coupon.expiresAt).getTime()) return "expired";
-  if (coupon.minSubtotalKopecks !== undefined && subtotal < coupon.minSubtotalKopecks) {
-    return "min_subtotal_not_met";
-  }
-  if (baseKopecks <= 0) return "not_applicable";
-  return null;
-}
-
-/**
- * Pure function; never throws because of coupon content.
- * @param order   order.coupons are codes in the order the customer typed them
- * @param catalog the known coupons
- * @param now     instant used for the expiresAt check (D-11)
- */
-export function priceOrder(order: Order, catalog: Coupon[], now: Date): PriceBreakdown {
+export function priceOrder(order: Order, catalog: Coupon[], now: Date = new Date()): OrderPricing {
   const subtotal = subtotalKopecks(order);
+  const tierDiscount = Math.round((subtotal * tierPercent(order)) / 100);
 
-  // Tier discount from the full pre-discount subtotal (D-1, D-4).
-  const tierDiscount = roundHalfUp((subtotal * tierPercent(order)) / 100);
-
-  const appliedCoupons: AppliedCoupon[] = [];
-  const rejectedCoupons: RejectedCoupon[] = [];
-  const seenCodes = new Set<string>();
-  // Remaining discountable amount — coupons are capped one by one (D-7, D-13).
-  let remainder = subtotal - tierDiscount;
+  const applied: AppliedCoupon[] = [];
+  const skipped: SkippedCoupon[] = [];
+  const used = new Set<string>();
 
   for (const code of order.coupons) {
-    const coupon = catalog.find((c) => c.code === code);
-    const base = coupon?.category !== undefined ? categorySumKopecks(order, coupon.category) : subtotal;
+    if (used.has(code)) {
+      skipped.push({ code, reason: "duplicate" });
+      continue;
+    }
+    used.add(code);
 
-    const reason = rejectionReason(coupon, seenCodes.has(code), subtotal, base, now);
-    seenCodes.add(code);
-    if (reason !== null) {
-      rejectedCoupons.push({ code, reason });
+    const coupon = catalog.find((c) => c.code === code);
+    if (!coupon) {
+      skipped.push({ code, reason: "unknown" });
+      continue;
+    }
+    if (now.getTime() >= new Date(coupon.expiresAt).getTime()) {
+      skipped.push({ code, reason: "expired" });
+      continue;
+    }
+    if (coupon.minSubtotalKopecks !== undefined && subtotal < coupon.minSubtotalKopecks) {
+      skipped.push({ code, reason: "below_min_subtotal" });
       continue;
     }
 
-    // coupon is defined here (reason would be "unknown" otherwise).
-    const nominal =
-      coupon!.kind === "percent" ? roundHalfUp((base * coupon!.value) / 100) : coupon!.value;
-    const granted = Math.min(nominal, base, remainder);
-    remainder -= granted;
-    appliedCoupons.push({ code, discountKopecks: granted });
+    const base =
+      coupon.category === undefined ? subtotal : categoryTotalKopecks(order, coupon.category);
+    if (base === 0) {
+      skipped.push({ code, reason: "no_matching_items" });
+      continue;
+    }
+
+    const discount =
+      coupon.kind === "percent"
+        ? Math.round((base * coupon.value) / 100)
+        : Math.min(coupon.value, base);
+    applied.push({ code, discountKopecks: discount });
   }
 
-  const couponDiscount = appliedCoupons.reduce((sum, c) => sum + c.discountKopecks, 0);
+  const couponDiscount = applied.reduce((sum, c) => sum + c.discountKopecks, 0);
+  const discountTotal = Math.min(tierDiscount + couponDiscount, subtotal);
   const shipping = shippingKopecks(order);
 
   return {
     subtotalKopecks: subtotal,
     tierDiscountKopecks: tierDiscount,
-    couponDiscountKopecks: couponDiscount,
-    appliedCoupons,
-    rejectedCoupons,
+    appliedCoupons: applied,
+    skippedCoupons: skipped,
+    discountKopecks: discountTotal,
     shippingKopecks: shipping,
-    totalKopecks: subtotal - tierDiscount - couponDiscount + shipping,
+    totalKopecks: subtotal - discountTotal + shipping,
   };
 }

@@ -1,181 +1,232 @@
-// One test per acceptance criterion of docs/spec/pricing-discounts.md, named
-// by AC ID so vitest output doubles as the traceability table, plus the two
-// extra scenarios from the OpenSpec delta spec.
+// Tests for the ad-hoc discount engine (materials/feature-request.md).
+// Each test name states the behaviour it pins down.
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { Coupon, LineItem, Order } from "./types.js";
 import { priceOrder } from "./discounts.js";
-import type { Order, LineItem, Coupon } from "./types.js";
 
-// Amounts are whole kopecks. Defaults per spec §4: country UA (shipping
-// 4_900), now = 2026-09-21T00:00:00Z, catalog coupons valid till 2027-01-01.
-const NOW = new Date("2026-09-21T00:00:00Z");
-const VALID_TILL = "2027-01-01T00:00:00Z";
+const NOW = new Date("2026-09-21T12:00:00Z");
+const FUTURE = "2026-12-31T00:00:00Z";
 
-const item = (over: Partial<LineItem> = {}): LineItem => ({
-  sku: "AA-1",
-  name: "Thing",
-  unitPriceKopecks: 100_000,
-  quantity: 1,
-  category: "standard",
-  ...over,
-});
+function item(overrides: Partial<LineItem> = {}): LineItem {
+  return {
+    sku: "SKU-1",
+    name: "Товар",
+    unitPriceKopecks: 100_000,
+    quantity: 1,
+    category: "standard",
+    ...overrides,
+  };
+}
 
-const order = (over: Partial<Order> = {}): Order => ({
-  id: "o1",
-  items: [item()],
-  country: "UA",
-  customerTier: "none",
-  coupons: [],
-  ...over,
-});
+function order(overrides: Partial<Order> = {}): Order {
+  return {
+    id: "ORD-1",
+    items: [item()],
+    country: "UA",
+    customerTier: "none",
+    coupons: [],
+    ...overrides,
+  };
+}
 
-const catalog: Coupon[] = [
-  { code: "SAVE10", kind: "percent", value: 10, expiresAt: VALID_TILL },
-  { code: "SAVE15", kind: "percent", value: 15, expiresAt: VALID_TILL },
-  { code: "TAKE50", kind: "fixed", value: 5_000, expiresAt: VALID_TILL },
-  { code: "FRESH10", kind: "percent", value: 10, expiresAt: VALID_TILL, category: "fresh" },
-  { code: "FRESH15", kind: "percent", value: 15, expiresAt: VALID_TILL, category: "fresh" },
-  { code: "MIN500", kind: "fixed", value: 5_000, expiresAt: VALID_TILL, minSubtotalKopecks: 50_000 },
-  { code: "OLD10", kind: "percent", value: 10, expiresAt: "2026-09-01T00:00:00Z" },
-  { code: "EDGE", kind: "percent", value: 10, expiresAt: NOW.toISOString() },
-  { code: "BIG150", kind: "fixed", value: 15_000, expiresAt: VALID_TILL },
-  { code: "BIG300", kind: "fixed", value: 30_000, expiresAt: VALID_TILL },
-];
+function coupon(overrides: Partial<Coupon> = {}): Coupon {
+  return { code: "SAVE", kind: "percent", value: 10, expiresAt: FUTURE, ...overrides };
+}
 
-describe("priceOrder", () => {
-  it("AC-1: Gold, no coupons — tier 10% of subtotal, shipping untouched", () => {
-    const b = priceOrder(order({ customerTier: "gold" }), catalog, NOW);
-    expect(b.subtotalKopecks).toBe(100_000);
-    expect(b.tierDiscountKopecks).toBe(10_000);
-    expect(b.couponDiscountKopecks).toBe(0);
-    expect(b.totalKopecks).toBe(94_900); // 90_000 items + 4_900 shipping
+describe("tier discount", () => {
+  it("silver takes 5% off the goods subtotal, shipping untouched", () => {
+    const r = priceOrder(order({ customerTier: "silver" }), [], NOW);
+    expect(r.tierDiscountKopecks).toBe(5_000);
+    expect(r.totalKopecks).toBe(100_000 - 5_000 + 4_900);
   });
 
-  it("AC-2: expired coupon — rejected with reason 'expired', no throw", () => {
-    const b = priceOrder(order({ coupons: ["OLD10"] }), catalog, NOW);
-    expect(b.rejectedCoupons).toEqual([{ code: "OLD10", reason: "expired" }]);
-    expect(b.couponDiscountKopecks).toBe(0);
-    expect(b.totalKopecks).toBe(104_900);
+  it("gold takes 10% off the goods subtotal", () => {
+    const r = priceOrder(order({ customerTier: "gold" }), [], NOW);
+    expect(r.tierDiscountKopecks).toBe(10_000);
+    expect(r.totalKopecks).toBe(100_000 - 10_000 + 4_900);
   });
 
-  it("AC-3: two coupons on the same category — each from the category sum", () => {
-    const o = order({
-      items: [
-        item({ sku: "F-1", category: "fresh", unitPriceKopecks: 40_000 }),
-        item({ sku: "S-1", category: "standard", unitPriceKopecks: 60_000 }),
+  it("tier 'none' gives no discount", () => {
+    const r = priceOrder(order(), [], NOW);
+    expect(r.tierDiscountKopecks).toBe(0);
+    expect(r.totalKopecks).toBe(104_900);
+  });
+});
+
+describe("coupons", () => {
+  it("percent coupon takes its percent of the goods subtotal", () => {
+    const r = priceOrder(
+      order({ coupons: ["FALL15"] }),
+      [coupon({ code: "FALL15", value: 15 })],
+      NOW,
+    );
+    expect(r.appliedCoupons).toEqual([{ code: "FALL15", discountKopecks: 15_000 }]);
+    expect(r.totalKopecks).toBe(100_000 - 15_000 + 4_900);
+  });
+
+  it("fixed coupon subtracts its amount in kopecks", () => {
+    const r = priceOrder(
+      order({ coupons: ["MINUS200"] }),
+      [coupon({ code: "MINUS200", kind: "fixed", value: 20_000 })],
+      NOW,
+    );
+    expect(r.appliedCoupons).toEqual([{ code: "MINUS200", discountKopecks: 20_000 }]);
+    expect(r.totalKopecks).toBe(100_000 - 20_000 + 4_900);
+  });
+
+  it("tier and coupon stack additively, each from the full subtotal", () => {
+    const r = priceOrder(
+      order({ customerTier: "gold", coupons: ["FALL15"] }),
+      [coupon({ code: "FALL15", value: 15 })],
+      NOW,
+    );
+    // 10% + 15% of 1000 грн = 250 грн, not 10% then 15% of the remainder.
+    expect(r.discountKopecks).toBe(25_000);
+    expect(r.totalKopecks).toBe(100_000 - 25_000 + 4_900);
+  });
+
+  it("all valid coupons apply, in the order the customer typed them", () => {
+    const r = priceOrder(
+      order({ coupons: ["FALL15", "MINUS50"] }),
+      [
+        coupon({ code: "FALL15", value: 15 }),
+        coupon({ code: "MINUS50", kind: "fixed", value: 5_000 }),
       ],
-      coupons: ["FRESH10", "FRESH15"],
-    });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.appliedCoupons).toEqual([
-      { code: "FRESH10", discountKopecks: 4_000 },
-      { code: "FRESH15", discountKopecks: 6_000 },
-    ]);
-    expect(b.couponDiscountKopecks).toBe(10_000);
+      NOW,
+    );
+    expect(r.appliedCoupons.map((c) => c.code)).toEqual(["FALL15", "MINUS50"]);
+    expect(r.discountKopecks).toBe(20_000);
   });
 
-  it("AC-4: fixed coupon larger than subtotal — truncated, goods part not negative", () => {
-    const o = order({ items: [item({ unitPriceKopecks: 10_000 })], coupons: ["BIG150"] });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.appliedCoupons).toEqual([{ code: "BIG150", discountKopecks: 10_000 }]);
-    expect(b.totalKopecks).toBe(4_900); // 0 goods + shipping
+  it("the same code typed twice counts once; the repeat is skipped as duplicate", () => {
+    const r = priceOrder(
+      order({ coupons: ["FALL15", "FALL15"] }),
+      [coupon({ code: "FALL15", value: 15 })],
+      NOW,
+    );
+    expect(r.appliedCoupons).toHaveLength(1);
+    expect(r.skippedCoupons).toEqual([{ code: "FALL15", reason: "duplicate" }]);
   });
 
-  it("AC-5: tier and coupon are additive, each from the full subtotal", () => {
-    const b = priceOrder(order({ customerTier: "gold", coupons: ["SAVE15"] }), catalog, NOW);
-    expect(b.tierDiscountKopecks).toBe(10_000);
-    expect(b.couponDiscountKopecks).toBe(15_000); // not 13_500 (sequential)
-    expect(b.totalKopecks).toBe(79_900);
+  it("an unknown code is skipped with reason, not an error", () => {
+    const r = priceOrder(order({ coupons: ["NOPE"] }), [], NOW);
+    expect(r.skippedCoupons).toEqual([{ code: "NOPE", reason: "unknown" }]);
+    expect(r.totalKopecks).toBe(104_900);
+  });
+});
+
+describe("expiry", () => {
+  it("an expired coupon is skipped with reason 'expired'", () => {
+    const r = priceOrder(
+      order({ coupons: ["OLD"] }),
+      [coupon({ code: "OLD", expiresAt: "2026-01-01T00:00:00Z" })],
+      NOW,
+    );
+    expect(r.skippedCoupons).toEqual([{ code: "OLD", reason: "expired" }]);
   });
 
-  it("AC-6: half a kopeck rounds up — Silver 5% of 9 990 is 500", () => {
-    const o = order({ customerTier: "silver", items: [item({ unitPriceKopecks: 9_990 })] });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.tierDiscountKopecks).toBe(500); // 499.5 → 500
-    expect(b.totalKopecks).toBe(14_390); // 9_990 − 500 + 4_900
+  it("a coupon is invalid exactly at its expiresAt instant", () => {
+    const r = priceOrder(
+      order({ coupons: ["EDGE"] }),
+      [coupon({ code: "EDGE", expiresAt: NOW.toISOString() })],
+      NOW,
+    );
+    expect(r.skippedCoupons).toEqual([{ code: "EDGE", reason: "expired" }]);
   });
+});
 
-  it("AC-7: empty order — zeros everywhere, coupon rejected, no error", () => {
-    const b = priceOrder(order({ items: [], customerTier: "gold", coupons: ["SAVE15"] }), catalog, NOW);
-    expect(b.subtotalKopecks).toBe(0);
-    expect(b.tierDiscountKopecks).toBe(0);
-    expect(b.couponDiscountKopecks).toBe(0);
-    expect(b.rejectedCoupons).toEqual([{ code: "SAVE15", reason: "not_applicable" }]);
-    expect(b.shippingKopecks).toBe(0);
-    expect(b.totalKopecks).toBe(0);
-  });
-
-  it("AC-8: minSubtotal checked before discounts — 50 000 passes despite tier", () => {
+describe("category coupons", () => {
+  it("a category percent coupon applies to that category's items only", () => {
     const o = order({
-      customerTier: "gold",
-      items: [item({ unitPriceKopecks: 50_000 })],
-      coupons: ["MIN500"],
+      items: [item(), item({ sku: "SKU-2", category: "fresh", unitPriceKopecks: 40_000 })],
+      coupons: ["FRESH10"],
     });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.appliedCoupons).toEqual([{ code: "MIN500", discountKopecks: 5_000 }]);
-    expect(b.totalKopecks).toBe(44_900); // 50_000 − 5_000 − 5_000 + 4_900
+    const r = priceOrder(o, [coupon({ code: "FRESH10", value: 10, category: "fresh" })], NOW);
+    expect(r.appliedCoupons).toEqual([{ code: "FRESH10", discountKopecks: 4_000 }]);
   });
 
-  it("AC-9: percent and fixed coupons both apply, in typed order", () => {
-    const b = priceOrder(order({ coupons: ["SAVE10", "TAKE50"] }), catalog, NOW);
-    expect(b.appliedCoupons).toEqual([
-      { code: "SAVE10", discountKopecks: 10_000 },
-      { code: "TAKE50", discountKopecks: 5_000 },
-    ]);
-    expect(b.totalKopecks).toBe(89_900);
-  });
-
-  it("AC-10: same code twice — second entry rejected as 'duplicate'", () => {
-    const b = priceOrder(order({ coupons: ["SAVE10", "SAVE10"] }), catalog, NOW);
-    expect(b.appliedCoupons).toEqual([{ code: "SAVE10", discountKopecks: 10_000 }]);
-    expect(b.rejectedCoupons).toEqual([{ code: "SAVE10", reason: "duplicate" }]);
-  });
-
-  it("AC-11: unknown code rejected, valid one still applies", () => {
-    const b = priceOrder(order({ coupons: ["NOPE", "SAVE10"] }), catalog, NOW);
-    expect(b.rejectedCoupons).toEqual([{ code: "NOPE", reason: "unknown" }]);
-    expect(b.appliedCoupons).toEqual([{ code: "SAVE10", discountKopecks: 10_000 }]);
-    expect(b.totalKopecks).toBe(94_900);
-  });
-
-  it("AC-12: digital order fully discounted — coupon capped, shipping never eaten", () => {
+  it("a fixed category coupon never exceeds that category's total", () => {
     const o = order({
-      customerTier: "gold",
-      items: [item({ category: "digital", unitPriceKopecks: 20_000 })],
-      coupons: ["BIG300"],
+      items: [item(), item({ sku: "SKU-2", category: "fresh", unitPriceKopecks: 3_000 })],
+      coupons: ["FRESH50"],
     });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.tierDiscountKopecks).toBe(2_000);
-    expect(b.appliedCoupons).toEqual([{ code: "BIG300", discountKopecks: 18_000 }]);
-    expect(b.shippingKopecks).toBe(0);
-    expect(b.totalKopecks).toBe(0);
+    const r = priceOrder(
+      o,
+      [coupon({ code: "FRESH50", kind: "fixed", value: 5_000, category: "fresh" })],
+      NOW,
+    );
+    expect(r.appliedCoupons).toEqual([{ code: "FRESH50", discountKopecks: 3_000 }]);
   });
 
-  // Extra scenarios from the OpenSpec delta spec (openspec/changes/add-discount-engine).
+  it("a category coupon with no matching items is skipped", () => {
+    const r = priceOrder(
+      order({ coupons: ["FRESH10"] }),
+      [coupon({ code: "FRESH10", category: "fresh" })],
+      NOW,
+    );
+    expect(r.skippedCoupons).toEqual([{ code: "FRESH10", reason: "no_matching_items" }]);
+  });
+});
 
-  it("category coupon on absent category — rejected as 'not_applicable'", () => {
-    const o = order({ items: [item({ unitPriceKopecks: 50_000 })], coupons: ["FRESH10"] });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.rejectedCoupons).toEqual([{ code: "FRESH10", reason: "not_applicable" }]);
-    expect(b.couponDiscountKopecks).toBe(0);
+describe("minimum subtotal", () => {
+  it("is checked against the pre-discount subtotal", () => {
+    // Gold tier would drop the paid amount below the minimum, but the check
+    // uses the raw subtotal, so the coupon still applies.
+    const r = priceOrder(
+      order({ customerTier: "gold", coupons: ["BIG"] }),
+      [coupon({ code: "BIG", kind: "fixed", value: 5_000, minSubtotalKopecks: 100_000 })],
+      NOW,
+    );
+    expect(r.appliedCoupons).toHaveLength(1);
   });
 
-  it("expiry boundary — coupon with expiresAt === now is already expired", () => {
-    const b = priceOrder(order({ coupons: ["EDGE"] }), catalog, NOW);
-    expect(b.rejectedCoupons).toEqual([{ code: "EDGE", reason: "expired" }]);
+  it("a coupon below its minimum subtotal is skipped with reason", () => {
+    const r = priceOrder(
+      order({ coupons: ["BIG"] }),
+      [coupon({ code: "BIG", kind: "fixed", value: 5_000, minSubtotalKopecks: 150_000 })],
+      NOW,
+    );
+    expect(r.skippedCoupons).toEqual([{ code: "BIG", reason: "below_min_subtotal" }]);
+  });
+});
+
+describe("rounding and bounds", () => {
+  it("half a kopeck rounds up, once per discount", () => {
+    // 5% of 1 990 kopecks = 99.5 → 100.
+    const o = order({ customerTier: "silver", items: [item({ unitPriceKopecks: 1_990 })] });
+    const r = priceOrder(o, [], NOW);
+    expect(r.tierDiscountKopecks).toBe(100);
   });
 
-  // Found by the Task C back-check: D-7 says later coupons grant 0 once the
-  // remainder is exhausted, but no AC pinned it. Added here, noted in
-  // docs/traceability.md.
+  it("total discount is capped at the subtotal — the total never drops below shipping", () => {
+    const r = priceOrder(
+      order({ customerTier: "gold", coupons: ["HUGE"] }),
+      [coupon({ code: "HUGE", kind: "fixed", value: 500_000 })],
+      NOW,
+    );
+    expect(r.discountKopecks).toBe(100_000);
+    expect(r.totalKopecks).toBe(4_900);
+  });
 
-  it("D-7: coupon after the remainder is exhausted applies with 0", () => {
-    const o = order({ items: [item({ unitPriceKopecks: 10_000 })], coupons: ["BIG150", "TAKE50"] });
-    const b = priceOrder(o, catalog, NOW);
-    expect(b.appliedCoupons).toEqual([
-      { code: "BIG150", discountKopecks: 10_000 },
-      { code: "TAKE50", discountKopecks: 0 },
-    ]);
-    expect(b.totalKopecks).toBe(4_900);
+  it("an all-digital order ships for free and still takes discounts", () => {
+    const o = order({
+      customerTier: "silver",
+      items: [item({ category: "digital", unitPriceKopecks: 30_000 })],
+    });
+    const r = priceOrder(o, [], NOW);
+    expect(r.shippingKopecks).toBe(0);
+    expect(r.totalKopecks).toBe(30_000 - 1_500);
+  });
+
+  it("an empty order totals zero and applies nothing", () => {
+    const r = priceOrder(
+      order({ items: [], customerTier: "gold", coupons: ["FALL15"] }),
+      [coupon({ code: "FALL15", value: 15 })],
+      NOW,
+    );
+    expect(r.subtotalKopecks).toBe(0);
+    expect(r.skippedCoupons).toEqual([{ code: "FALL15", reason: "no_matching_items" }]);
+    expect(r.totalKopecks).toBe(0);
   });
 });
