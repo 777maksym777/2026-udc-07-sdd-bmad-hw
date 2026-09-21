@@ -49,6 +49,14 @@ const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\
 /** Epoch ms of a valid expiresAt, or null when the string is invalid (D-16). */
 function expiresAtMs(expiresAt: string): number | null {
   if (!ISO_INSTANT.test(expiresAt)) return null;
+  // Date.parse silently rolls calendar-invalid days (Feb 30 → Mar 2) and the
+  // 24:00 hour onto the next day — validate the components before trusting it.
+  const year = Number(expiresAt.slice(0, 4));
+  const month = Number(expiresAt.slice(5, 7));
+  const day = Number(expiresAt.slice(8, 10));
+  const hour = Number(expiresAt.slice(11, 13));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23) return null;
   const ms = Date.parse(expiresAt);
   return Number.isNaN(ms) ? null : ms;
 }

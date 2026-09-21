@@ -181,18 +181,23 @@ describe("acceptance criteria", () => {
     expect(r.totalKopecks).toBe(4_900);
   });
 
-  it("AC-14: offset-less or malformed expiresAt — rejected 'expired' regardless of TZ", () => {
+  it("AC-14: offset-less, malformed or calendar-invalid expiresAt — rejected 'expired' regardless of TZ", () => {
     const r = priceOrder(
-      order({ coupons: ["BADTIME", "GARBAGE"] }),
+      order({ coupons: ["BADTIME", "GARBAGE", "FEB30", "NONLEAP"] }),
       [
         coupon({ code: "BADTIME", expiresAt: "2026-12-31T23:59" }),
         coupon({ code: "GARBAGE", expiresAt: "not-a-date" }),
+        // Date.parse would silently roll these onto March — D-16 rejects them.
+        coupon({ code: "FEB30", expiresAt: "2027-02-30T00:00:00Z" }),
+        coupon({ code: "NONLEAP", expiresAt: "2027-02-29T00:00:00Z" }),
       ],
       NOW,
     );
     expect(r.rejectedCoupons).toEqual([
       { code: "BADTIME", reason: "expired" },
       { code: "GARBAGE", reason: "expired" },
+      { code: "FEB30", reason: "expired" },
+      { code: "NONLEAP", reason: "expired" },
     ]);
   });
 

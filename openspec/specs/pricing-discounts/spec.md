@@ -149,19 +149,21 @@ treat a coupon as expired when `now ≥ expiresAt` (D-11). A coupon's
 `expiresAt` SHALL be accepted only as a full ISO-8601 instant with an
 explicit `Z` or numeric offset, parsed with `Date.parse` and compared in
 epoch milliseconds; any other string (date-only, date-time without an
-offset, garbage) makes the coupon invalid with reason `expired`, so the
-result never depends on the machine's time zone (D-16). Equal inputs SHALL
+offset, garbage, or a calendar-invalid instant such as February 30 or hour
+24, whose components are validated before `Date.parse` to prevent silent
+rollover) makes the coupon invalid with reason `expired`, so the result
+never depends on the machine's time zone (D-16). Equal inputs SHALL
 always produce equal outputs (pure function).
 
 #### Scenario: Expiry boundary instant
 - **WHEN** a coupon's `expiresAt` equals `now` exactly
 - **THEN** the coupon is rejected with reason `expired`
 
-#### Scenario: AC-14 Offset-less or malformed expiresAt
-- **WHEN** a catalog coupon has `expiresAt = "2026-12-31T23:59"` (no offset)
-  or `"not-a-date"`
+#### Scenario: AC-14 Offset-less, malformed or calendar-invalid expiresAt
+- **WHEN** a catalog coupon has `expiresAt = "2026-12-31T23:59"` (no offset),
+  `"not-a-date"`, or `"2027-02-30T00:00:00Z"` (a day that does not exist)
 - **THEN** it is rejected with reason `expired` on any machine, regardless
-  of its time zone
+  of its time zone, and the date is never silently rolled into March
 
 ### Requirement: Coupon codes are matched strictly
 The engine SHALL look up coupon codes with strict `===` comparison against
