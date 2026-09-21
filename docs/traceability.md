@@ -20,6 +20,9 @@
 | AC-10 | Дубль коду → друге входження `duplicate` | `discounts.ts:rejectionReason` (`seenCodes`) | `AC-10: same code twice — second entry rejected as 'duplicate'` | ✅ |
 | AC-11 | Невідомий код → `unknown`, валідний поруч працює | `discounts.ts:rejectionReason` (`unknown`) | `AC-11: unknown code rejected, valid one still applies` | ✅ |
 | AC-12 | Digital-замовлення: кап по залишку, доставка 0, total 0 | `discounts.ts:priceOrder` (`remainder`) + `pricing.ts:shippingKopecks` | `AC-12: digital order fully discounted — coupon capped, shipping never eaten` | ✅ |
+| AC-13 | «Зʼїдений» залишком купон → `not_applicable`, applied без нулів (D-15) | `discounts.ts:priceOrder` (`granted <= 0` → reject) | `AC-13: coupon eaten by an exhausted remainder — rejected 'not_applicable', never applied with 0` | ✅ |
+| AC-14 | `expiresAt` без зсуву/сміття → `expired` незалежно від TZ (D-16) | `discounts.ts:expiresAtMs` (`ISO_INSTANT`) | `AC-14: offset-less or malformed expiresAt — rejected 'expired' regardless of TZ` | ✅ |
+| AC-15 | Інший регістр коду → `unknown`, строге `===` (D-17) | `discounts.ts:priceOrder` (`catalog.find`, строге порівняння) | `AC-15: case mismatch — 'save10' vs catalog 'SAVE10' is 'unknown'` | ✅ |
 
 ## Зворотна перевірка
 
@@ -31,15 +34,25 @@
   дописував — поведінка вже зафіксована в D-7, бракувало лише тесту).
   Іншої «ініціативи» в коді немає: кожна гілка `discounts.ts` виводиться з
   D-1…D-14.
-- **Чи є AC без тесту?** Немає — усі 12 у таблиці, назви тестів збігаються з ID.
-- **Чи є тест, який не мапиться на жоден AC?** Три, всі навмисні:
-  1. `category coupon on absent category …` — сценарій D-12 з дельта-спеки
-     OpenSpec (категорії немає в замовленні → `not_applicable`);
-  2. `expiry boundary …` — межа D-11 (`now === expiresAt` → `expired`);
-  3. `D-7: coupon after the remainder is exhausted …` — знахідка зворотної
-     перевірки, див. вище.
-  Вони закріплюють рішення D-7/D-11/D-12, які мають нормативний текст у спеці,
-  але не мають власного AC.
+- **Чи є AC без тесту?** Немає — усі 15 у таблиці, назви тестів збігаються з ID.
+- **Чи є тест, який не мапиться на жоден AC?** Сім, усі навмисні — вони
+  закріплюють граничні формулювання рішень, що мають нормативний текст у
+  спеці, але не мають власного AC (частину з них як прогалину назвала рецензія
+  Task E, SA-4/SA-6/SA-7): `D-11` (межа `now === expiresAt`), `D-16` (валідний
+  явний зсув `+02:00`), `D-6` (провальна гілка `min_subtotal_not_met`),
+  `D-12` (відсутня категорія), `D-4` (пів копійки для відсоткового купона),
+  `D-13` (кап фіксованого купона об суму категорії) та інваріантний тест
+  breakdown-а (кожен код рівно в одному зі списків).
+
+> **Оновлення 2026-09-21 (після рецензії Task E).** Панель BA/SA/Architect
+> знайшла, що місце зі зворотної перевірки — «купон після вичерпання залишку
+> дає 0» — було не просто недотестоване, а суперечило обґрунтуванню D-12.
+> Спека тепер вирішує це явно: рішення **D-15** (такий купон відхиляється з
+> `not_applicable`, applied без нулів) з власним **AC-13**; колишній тест
+> `D-7: … applies with 0` замінено на AC-13-тест із протилежним очікуванням.
+> Разом із D-16 (формат `expiresAt`) і D-17 (строге порівняння кодів)
+> реалізацію й тести вирівняно під спеку: 15 AC-тестів + 7 граничних, 30
+> зелених разом із наявними у `pricing.test.ts`.
 
 ## Що з цього вийшло
 

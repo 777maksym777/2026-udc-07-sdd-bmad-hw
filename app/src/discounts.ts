@@ -1,106 +1,139 @@
-// Discount engine for the autumn campaign (materials/feature-request.md).
-// All amounts are whole kopecks. Discounts apply to the goods subtotal only;
-// shipping is added afterwards and is never discounted.
+// Discount engine. Implements docs/spec/pricing-discounts.md (decisions
+// D-1..D-17, criteria AC-1..AC-15). All amounts are whole kopecks; the only
+// fractional values are transient percentage results, each rounded exactly
+// once (half a kopeck rounds up, D-4).
 
-import type { Coupon, LineItem, Order } from "./types.js";
-import { lineTotalKopecks, shippingKopecks, subtotalKopecks, tierPercent } from "./pricing.js";
+import type { Order, LineItem, Coupon } from "./types.js";
+import { lineTotalKopecks, subtotalKopecks, shippingKopecks, tierPercent } from "./pricing.js";
 
-export type SkipReason =
-  | "unknown"
-  | "duplicate"
-  | "expired"
-  | "below_min_subtotal"
-  | "no_matching_items";
+export type CouponRejectionReason =
+  | "expired" // now ≥ expiresAt, or expiresAt is not a valid instant (D-8, D-11, D-16)
+  | "unknown" // code not in the catalog; strict === match (D-9, D-17)
+  | "duplicate" // same code entered again (D-10)
+  | "min_subtotal_not_met" // pre-discount subtotal < minSubtotalKopecks (D-6)
+  | "not_applicable"; // the coupon's base is empty or its effective discount is 0 (D-12, D-14, D-15)
 
 export interface AppliedCoupon {
   code: string;
+  /** Actually granted amount — possibly truncated per D-7/D-13; never 0 (D-15). */
   discountKopecks: number;
 }
 
-export interface SkippedCoupon {
+export interface RejectedCoupon {
   code: string;
-  reason: SkipReason;
+  reason: CouponRejectionReason;
 }
 
-export interface OrderPricing {
+export interface PriceBreakdown {
   subtotalKopecks: number;
   tierDiscountKopecks: number;
-  /** Valid coupons, in the order the customer typed them. */
+  /** Sum over appliedCoupons. */
+  couponDiscountKopecks: number;
+  /** In the order the customer typed the codes. */
   appliedCoupons: AppliedCoupon[];
-  /** Coupons that did not apply, each with the reason — never a thrown error. */
-  skippedCoupons: SkippedCoupon[];
-  /** tier + coupons, capped at the subtotal so the goods part never goes negative. */
-  discountKopecks: number;
+  /** In the order the customer typed the codes. */
+  rejectedCoupons: RejectedCoupon[];
   shippingKopecks: number;
+  /** subtotal − tier − coupons + shipping; never below shipping (D-2, D-7). */
   totalKopecks: number;
 }
 
-function categoryTotalKopecks(order: Order, category: LineItem["category"]): number {
+/** Half a kopeck rounds up; inputs are always non-negative here (D-4). */
+function roundHalfUp(x: number): number {
+  return Math.round(x);
+}
+
+/** D-16: only a full ISO-8601 instant with an explicit Z or numeric offset. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+/** Epoch ms of a valid expiresAt, or null when the string is invalid (D-16). */
+function expiresAtMs(expiresAt: string): number | null {
+  if (!ISO_INSTANT.test(expiresAt)) return null;
+  const ms = Date.parse(expiresAt);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function categorySumKopecks(order: Order, category: LineItem["category"]): number {
   return order.items
-    .filter((item) => item.category === category)
-    .reduce((sum, item) => sum + lineTotalKopecks(item), 0);
+    .filter((i) => i.category === category)
+    .reduce((sum, i) => sum + lineTotalKopecks(i), 0);
 }
 
 /**
- * Prices an order: tier discount plus every valid coupon, all computed from
- * the pre-discount subtotal (or the coupon's category slice of it), summed,
- * capped at the subtotal, shipping added on top. Each percentage is rounded
- * once with Math.round (half a kopeck rounds up).
+ * First matching rejection reason, or null when the coupon is valid.
+ * Normative order: unknown → duplicate → expired → min_subtotal_not_met →
+ * not_applicable (D-6, D-8..D-12, D-16).
  */
-export function priceOrder(order: Order, catalog: Coupon[], now: Date = new Date()): OrderPricing {
-  const subtotal = subtotalKopecks(order);
-  const tierDiscount = Math.round((subtotal * tierPercent(order)) / 100);
+function rejectionReason(
+  coupon: Coupon | undefined,
+  alreadySeen: boolean,
+  subtotal: number,
+  baseKopecks: number,
+  now: Date,
+): CouponRejectionReason | null {
+  if (!coupon) return "unknown";
+  if (alreadySeen) return "duplicate";
+  const expiry = expiresAtMs(coupon.expiresAt);
+  if (expiry === null || now.getTime() >= expiry) return "expired";
+  if (coupon.minSubtotalKopecks !== undefined && subtotal < coupon.minSubtotalKopecks) {
+    return "min_subtotal_not_met";
+  }
+  if (baseKopecks <= 0) return "not_applicable";
+  return null;
+}
 
-  const applied: AppliedCoupon[] = [];
-  const skipped: SkippedCoupon[] = [];
-  const used = new Set<string>();
+/**
+ * Pure function; never throws because of coupon content.
+ * @param order   order.coupons are codes in the order the customer typed them
+ * @param catalog the known coupons; codes matched with strict === (D-17)
+ * @param now     instant used for the expiresAt check (D-11)
+ */
+export function priceOrder(order: Order, catalog: Coupon[], now: Date): PriceBreakdown {
+  const subtotal = subtotalKopecks(order);
+
+  // Tier discount from the full pre-discount subtotal (D-1, D-4).
+  const tierDiscount = roundHalfUp((subtotal * tierPercent(order)) / 100);
+
+  const appliedCoupons: AppliedCoupon[] = [];
+  const rejectedCoupons: RejectedCoupon[] = [];
+  const seenCodes = new Set<string>();
+  // Remaining discountable amount — coupons are capped one by one (D-7, D-13).
+  let remainder = subtotal - tierDiscount;
 
   for (const code of order.coupons) {
-    if (used.has(code)) {
-      skipped.push({ code, reason: "duplicate" });
-      continue;
-    }
-    used.add(code);
-
     const coupon = catalog.find((c) => c.code === code);
-    if (!coupon) {
-      skipped.push({ code, reason: "unknown" });
-      continue;
-    }
-    if (now.getTime() >= new Date(coupon.expiresAt).getTime()) {
-      skipped.push({ code, reason: "expired" });
-      continue;
-    }
-    if (coupon.minSubtotalKopecks !== undefined && subtotal < coupon.minSubtotalKopecks) {
-      skipped.push({ code, reason: "below_min_subtotal" });
+    const base = coupon?.category !== undefined ? categorySumKopecks(order, coupon.category) : subtotal;
+
+    const reason = rejectionReason(coupon, seenCodes.has(code), subtotal, base, now);
+    seenCodes.add(code);
+    if (reason !== null) {
+      rejectedCoupons.push({ code, reason });
       continue;
     }
 
-    const base =
-      coupon.category === undefined ? subtotal : categoryTotalKopecks(order, coupon.category);
-    if (base === 0) {
-      skipped.push({ code, reason: "no_matching_items" });
+    // coupon is defined here (reason would be "unknown" otherwise).
+    const nominal =
+      coupon!.kind === "percent" ? roundHalfUp((base * coupon!.value) / 100) : coupon!.value;
+    const granted = Math.min(nominal, base, remainder);
+    if (granted <= 0) {
+      // D-15: an applied coupon never carries a 0 discount.
+      rejectedCoupons.push({ code, reason: "not_applicable" });
       continue;
     }
-
-    const discount =
-      coupon.kind === "percent"
-        ? Math.round((base * coupon.value) / 100)
-        : Math.min(coupon.value, base);
-    applied.push({ code, discountKopecks: discount });
+    remainder -= granted;
+    appliedCoupons.push({ code, discountKopecks: granted });
   }
 
-  const couponDiscount = applied.reduce((sum, c) => sum + c.discountKopecks, 0);
-  const discountTotal = Math.min(tierDiscount + couponDiscount, subtotal);
+  const couponDiscount = appliedCoupons.reduce((sum, c) => sum + c.discountKopecks, 0);
   const shipping = shippingKopecks(order);
 
   return {
     subtotalKopecks: subtotal,
     tierDiscountKopecks: tierDiscount,
-    appliedCoupons: applied,
-    skippedCoupons: skipped,
-    discountKopecks: discountTotal,
+    couponDiscountKopecks: couponDiscount,
+    appliedCoupons,
+    rejectedCoupons,
     shippingKopecks: shipping,
-    totalKopecks: subtotal - discountTotal + shipping,
+    totalKopecks: subtotal - tierDiscount - couponDiscount + shipping,
   };
 }

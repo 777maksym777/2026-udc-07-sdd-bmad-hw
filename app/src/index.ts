@@ -6,9 +6,9 @@ export {
   tierPercent,
 } from "./pricing.js";
 export type {
-  SkipReason,
+  CouponRejectionReason,
   AppliedCoupon,
-  SkippedCoupon,
-  OrderPricing,
+  RejectedCoupon,
+  PriceBreakdown,
 } from "./discounts.js";
 export { priceOrder } from "./discounts.js";
