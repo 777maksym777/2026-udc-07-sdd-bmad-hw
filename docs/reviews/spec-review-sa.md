@@ -2,6 +2,8 @@
 
 > Агент: `.claude/agents/spec-reviewer-sa.md` · Обʼєкт: `docs/spec/pricing-discounts.md`
 > Дата: 2026-09-21 · Хост: Claude Code / Fable 5
+> **Статус:** SA-1 закрито D-17 + AC-15, SA-2(в) — D-16 + AC-14, SA-3 — D-15
+> + AC-13 (спека, 2026-09-21); SA-2(а,б), SA-4…SA-8 — відкриті.
 
 ## Рецензія SA
 

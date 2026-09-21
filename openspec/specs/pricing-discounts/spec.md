@@ -6,7 +6,7 @@ Deterministic computation of an order's discounted price: loyalty-tier
 discount plus promo codes (percent/fixed, category- and minimum-restricted),
 with fixed rounding and capping rules, returned as a structured
 `PriceBreakdown`. Source of decisions: `docs/spec/pricing-discounts.md`
-(D-1…D-14, AC-1…AC-12).
+(D-1…D-17, AC-1…AC-15).
 
 All amounts below are integer kopecks (1 000 грн = 100 000 kopecks). Unless a
 scenario says otherwise: country `UA` (shipping 4 900), `now =
@@ -96,9 +96,11 @@ pre-discount item subtotal, not the subtotal after other discounts (D-6).
 The sum of tier and coupon discounts SHALL NOT exceed the item subtotal.
 Coupons are capped one by one in typed order: each receives
 `min(nominal, base, remainder)` where the remainder is the subtotal minus the
-tier discount and previously granted coupon discounts; once the remainder is
-0, later coupons grant 0 (D-7, D-13). The goods part of the total is
-therefore never negative.
+tier discount and previously granted coupon discounts (D-7, D-13). A coupon
+whose effective discount would be 0 SHALL be rejected with reason
+`not_applicable` instead of appearing as applied with 0; `appliedCoupons`
+SHALL never contain an entry with `discountKopecks = 0` (D-15). The goods
+part of the total is therefore never negative.
 
 #### Scenario: AC-4 Fixed coupon larger than the order (boundary)
 - **WHEN** subtotal is 10 000, tier is none, and a fixed coupon of 15 000 is
@@ -106,14 +108,23 @@ therefore never negative.
 - **THEN** the coupon is truncated to 10 000 and
   `totalKopecks = 0 + 4 900 = 4 900`
 
+#### Scenario: AC-13 Coupon eaten by an exhausted remainder (boundary)
+- **WHEN** subtotal is 10 000 with no tier, and fixed coupon `TAKE100`
+  (10 000) is entered followed by `SAVE10` (10%)
+- **THEN** `TAKE100` grants 10 000, `SAVE10` (base 10 000 > 0, remainder 0)
+  is rejected with reason `not_applicable`, and
+  `totalKopecks = 0 + 4 900 = 4 900`
+
 ### Requirement: Invalid coupons are rejected with a structured reason, never an exception
 `priceOrder` SHALL never throw because of coupon content. An invalid coupon
 SHALL NOT affect the price and SHALL appear in `rejectedCoupons` with the
-first matching reason, checked in the order: `unknown` (not in catalog, D-9)
-→ `duplicate` (same code entered again, D-10) → `expired`
-(`now ≥ expiresAt`, D-8/D-11) → `min_subtotal_not_met` (D-6) →
-`not_applicable` (empty base, D-12). Valid coupons in the same order still
-apply.
+first matching reason, checked in the order: `unknown` (not in catalog;
+codes are matched with strict `===`, no trimming or case folding — input
+normalization is the UI's job, D-9/D-17) → `duplicate` (same code entered
+again, D-10) → `expired` (`now ≥ expiresAt`, or `expiresAt` is not a full
+ISO-8601 instant with an explicit offset/`Z`, D-8/D-11/D-16) →
+`min_subtotal_not_met` (D-6) → `not_applicable` (empty base, D-12; or
+effective discount 0, D-15). Valid coupons in the same order still apply.
 
 #### Scenario: AC-2 Expired coupon
 - **WHEN** a coupon with `expiresAt = 2026-09-01T00:00:00Z` is entered at
@@ -134,12 +145,34 @@ apply.
 
 ### Requirement: Time is an explicit parameter
 The engine SHALL take the current instant `now` as an explicit parameter and
-treat a coupon as expired when `now ≥ expiresAt` (D-11). Equal inputs SHALL
+treat a coupon as expired when `now ≥ expiresAt` (D-11). A coupon's
+`expiresAt` SHALL be accepted only as a full ISO-8601 instant with an
+explicit `Z` or numeric offset, parsed with `Date.parse` and compared in
+epoch milliseconds; any other string (date-only, date-time without an
+offset, garbage) makes the coupon invalid with reason `expired`, so the
+result never depends on the machine's time zone (D-16). Equal inputs SHALL
 always produce equal outputs (pure function).
 
 #### Scenario: Expiry boundary instant
 - **WHEN** a coupon's `expiresAt` equals `now` exactly
 - **THEN** the coupon is rejected with reason `expired`
+
+#### Scenario: AC-14 Offset-less or malformed expiresAt
+- **WHEN** a catalog coupon has `expiresAt = "2026-12-31T23:59"` (no offset)
+  or `"not-a-date"`
+- **THEN** it is rejected with reason `expired` on any machine, regardless
+  of its time zone
+
+### Requirement: Coupon codes are matched strictly
+The engine SHALL look up coupon codes with strict `===` comparison against
+the catalog — no trimming and no case normalization; normalizing user input
+is the UI's responsibility before calling the engine (D-17).
+
+#### Scenario: AC-15 Case mismatch
+- **WHEN** the catalog contains `SAVE10` (10%) and the customer types
+  `save10` on a subtotal of 100 000
+- **THEN** the code is rejected with reason `unknown`, the discount is 0,
+  and `totalKopecks = 104 900`
 
 ### Requirement: Empty order is a valid input
 An order with no items SHALL yield subtotal 0, tier and coupon discounts 0,

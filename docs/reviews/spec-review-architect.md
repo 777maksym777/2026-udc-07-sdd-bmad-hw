@@ -2,6 +2,8 @@
 
 > Агент: `.claude/agents/spec-reviewer-architect.md` · Обʼєкт: `docs/spec/pricing-discounts.md`
 > Дата: 2026-09-21 · Хост: Claude Code / Fable 5
+> **Статус:** AR-1 закрито D-16 + AC-14, AR-5 — D-15 + AC-13 (спека,
+> 2026-09-21); AR-2/3/4/6 — відкриті, AR-7 — дій не потребує.
 
 ## Рецензія Architect
 
